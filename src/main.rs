@@ -1,70 +1,115 @@
-use faer::{assert_matrix_eq, dbgf, mat, prelude::*, Side};
+
+use faer::{assert_matrix_eq, dbgf, linalg, mat, prelude::*, Side};
 use faer::complex_native::c64;
-use nalgebra:: DMatrix;
-use num_complex::Complex64;
-use std::time::Instant;
+use faer::linalg::zip;
+use faer::col::*;
+use num::*;
+const N_STATES : usize = 7;
 
-fn main() {
-    let matrix = mat![
-        [2.28583329, -0.90628668, -1.71493024],
-        [-0.90628668, 4.00729077, 2.17332502],
-        [-1.71493024, 2.17332502, 1.97196187]
-    ];
+const N_FINER : usize = 9;
+const N_COARSE : usize = 5;
+use faer::iter;
+fn main () {
 
-    let chol = match matrix.cholesky(Side::Lower) {
-        Ok(chol) => chol,
-        Err(_) => panic!("Non positive definite matrix"),
-    };
+    let myvec = vec![0,1];
+    println!("{:?}", myvec );
+    let max_p = 6.0;
+    let mut a = mat::Mat::<c64>::identity(2, 1);
+    a.write(0, 0, c64::new(0.0,-1.0));
+    a.write(1, 0, c64::new(0.0, 2.0));
 
-    let rhs = mat![
-        [-0.29945184, -0.5228196],
-        [0.84136125, -1.15768694],
-        [1.25678304, -0.46203532]
-    ];
+    println!("{:?}", a.adjoint());
+    let q=0.0;
+    println!("{:?}", a.adjoint()*&a);
 
-    let sol = chol.solve(&rhs);
-    assert_matrix_eq!(rhs, &matrix * &sol, comp = abs, tol = 1e-10);
+    let fam = mat::Mat::<c64>::from_fn( N_STATES, 1, |i,_j| -> c64 {c64::new((i as f64 * 2.0 - max_p + q).powi(2), 0.0)} );
 
-    let mut shah_matrix = mat![
-        [c64::new(0.0, 0.0) , c64::new(0.0, -1.0) ],
-        [c64::new(0.0, 1.0) , c64::new(0.0, 0.0)]
-    ];
+    let mut h0new = mat::Mat::<c64>::identity(N_STATES, N_STATES)*fam;
 
-    let mut shah_matrix2 = shah_matrix.clone();
-    shah_matrix2.write(1,1, c64::new(1.0, 2.0));
-    println!("{}", shah_matrix2.read(1,1));
+    h0new[(1,0)] = c64::new(1.0,2.0);
+    println!("{:?}", h0new);
 
-    let temp = shah_matrix * shah_matrix2;
-    print!("{:?}", temp);
+    let out = mat![ [c64::from(2.0), c64::from(1.0)]];
+    let matr: Mat<f64> = zipped!(&out).map( |unzipped!( x)| (*x).norm_sqr() );
+    println!("{:?}", matr);
 
-    dbg!(temp.sum());
+    let mut matrix = mat! [[c64::from(2.0), c64::from(1.0)], [c64::from(3.0),c64::from( 4.0)]];
 
-    println!("");
-    println!("nalgbera now");
-
-    let max : usize = 1000;
-
-    let mut temp_new_nalg = DMatrix::<Complex64>::zeros( max, max);
-
-    let now = Instant::now();
-    for i in 0..temp_new_nalg.nrows(){
-        for j in 0..temp_new_nalg.ncols() {
-            temp_new_nalg[(i,j)] = Complex64::new( i as f64 + j as f64, i as f64 - j as f64);
+    let mut matrix2 = mat::Mat::<c64>::with_capacity(2, 2);
+    unsafe { matrix2.set_dims(2, 2);}
+    for i in 0..2 {
+        for j in 0..2 {
+            matrix2[(i,j)]= matrix[(i,j)];
         }
     }
-    let evd = temp_new_nalg.symmetric_eigenvalues();
-    println!("{:?}", now.elapsed());
+    println!("{:?}", &matrix.row_capacity());
+
+    let wow = matrix.as_ptr_mut();
+    let wow2 = matrix2.as_ptr_mut();
+    unsafe { 
+        for i in 0..matrix.row_capacity()*matrix.col_capacity()  {
+            println!("{:?}", *(wow.wrapping_add(i))); 
+        }
+    }
+    println!("Now the ohter one");
+    unsafe { 
+        for i in 0..matrix2.row_capacity()*matrix2.col_capacity()  {
+            println!("{:?}", *(wow2.wrapping_add(i))); 
+        }
+    }
+
+    let psi = mat![ [ c64::from(2.0)],[ c64::from(3.0)]];
+    let target = mat! [[c64::from(3.0)], [c64::from(-2.0)]];
+
+    println!("{:?}", target.adjoint().shape());
+    println!("{:?}", &psi.shape());
+    println!("{:?}", (target.adjoint()*psi)[(0,0)]);
+
+
+
+    let delta_p = 0.01;
+    let max_coarse = N_COARSE as f64 - 1.0;
+    let mut ones =  mat::Mat::<f64>::zeros(1,N_FINER); ones.fill(1.0) ;
+    let momentum_states = mat::Mat::<f64>::from_fn( N_COARSE, 1, |i,_j|    2.0 * i as f64 - max_coarse) * ones.clone();
     
-    println!("Faers Now");
-    let now = Instant::now();
-    let mut temp_new = mat::Mat::<c64>::zeros(max,max);
-    for i in 0..temp_new.nrows() {
-        for j in 0..temp_new.ncols() {
-            temp_new.write(i, j , c64::new(i as f64 + j as f64,i as f64 - j as f64));
+    println!("Momentum States are {:?}", momentum_states);
+
+    ones = mat::Mat::<f64>::zeros(N_COARSE, 1); ones.fill(1.0) ;
+    let finer = ones * mat::Mat::<f64>::from_fn( 1, N_FINER, |_i,j|    delta_p* (j as f64 - (N_FINER as f64 - 1.0)/2.0 ) ) ;
+    println!("The finer momentum is {:?}", finer);
+
+    let mut p = momentum_states + finer;
+    println!("Our convolved momentum States are {:?}", p);
+
+    let h0  = mat::Mat::<f64>::from_fn( p.nrows(), p.ncols(), |i,j| p[(i,j)].powi(2));
+    println!("{:?}", h0);
+
+    let mut h2 = mat::Mat::<f64>::zeros( N_COARSE , N_COARSE );
+
+    let depth = 10.0;
+    for i in 0..N_COARSE {
+        if i + 1 < N_COARSE  {
+
+            h2.write(i, i + 1,  (depth / 4.0) );
+            h2.write(i + 1, i ,  (depth / 4.0) );
+
         }
     }
-    let evd2 = temp_new.selfadjoint_eigenvalues(Side::Lower);
-    println!("{:?}", now.elapsed());
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    println!("{:?}, {:?}", evd, evd2);
+
+    println!("Operating h2 on momentum{:?}", h0+ h2 * p);
+
+/* 
+
+
+   // in place mutation
+let mut mat: Mat<f64> = todo!();
+zipped!(&mut mat).for_each(|unzipped!(mut x)| *x = 2.0 * (*x) + 1.0);
+
+// map + collect into a new matrix
+let mat: Mat<f64> = todo!();
+let new_mat = zipped!(&mat).map(|unzipped!(x)| (*x) * (*x) + 1.0);
+
+*/
+
+
 }
